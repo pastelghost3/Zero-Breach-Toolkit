@@ -28,7 +28,8 @@ from .localpaths import path_problem
 from .result import (CLEAN, HITS, PARTIAL, UNKNOWN, Lead, ModuleResult, is_serious,
                      EV_ON_DISK, EV_FILE_PATTERN, EV_PERSISTENCE, EV_COMMAND, EV_CONTACTED,
                      EV_ATTEMPTED, EV_ON_DEVICE, EV_DEVICE_LOG, EV_RECEIVED, EV_EXECUTION, EV_INVENTORY,
-                     EV_CONFIGURED, EV_REFERENCED, EV_DNS, EVIDENCE_ORDER)
+                     EV_CONFIGURED, EV_REFERENCED, EV_DNS, EVIDENCE_ORDER,
+                     NOT_ADDRESSES as _NOT_ADDRESSES, net_value as _net_value)
 
 # The exact text required by D1. Do not reword.
 D1_LINE = ("No known indicators were found in the places that can be checked. "
@@ -392,6 +393,25 @@ def finalize_report(iocs, results, started, args, cancelled=False):
     document["indicator_fingerprints"] = workflow_fingerprints(iocs)
     document["must_relay"] = contract_must_relay(document)
     failed = False
+
+    if getattr(args, "export_blocklist", None):
+        from .export import write_blocklist
+        try:
+            workflow_output_guard(args, args.export_blocklist, document)
+            document["blocklist_export"] = {
+                "format": args.blocklist_format,
+                "requested": True,
+                "written": None,
+            }
+            n = attempt(lambda: write_blocklist(document, args.export_blocklist,
+                                                args.blocklist_format, __version__))
+            document["blocklist_export"]["written"] = n
+            _report_console("[wrote {} indicator(s) to {} blocklist]".format(
+                n, args.blocklist_format), sys.stderr)
+        except (OSError, ValueError, TypeError) as exc:
+            failed = True
+            _report_console("[could not write blocklist: {}]".format(exc), sys.stderr)
+
     for label, path, minimal in (("JSON report", args.json, False), ("sharing summary", args.share_json, True)):
         if not path:
             continue
@@ -1054,16 +1074,6 @@ def _evidence_gloss(hit) -> str:
     return EVIDENCE_MEANING.get(hit.get("evidence") or "", "")
 
 
-# Indicator kinds that are not network addresses: shown as written.
-_NOT_ADDRESSES = {"app-id", "app-cert", "file-path", "file-name", "android-property",
-                  "process", "profile-id", "sha256"}
-
-
-def _net_value(hit) -> str:
-    """The hit's indicator if it is (or may be) a network address, else ''."""
-    return "" if hit.get("kind") in _NOT_ADDRESSES else hit.get("indicator", "")
-
-
 def _show_indicator(hit, document=None) -> str:
     """Defang network indicators only. An app id such as com.life360.android
     is not an address anyone could click, and '[.]' made it look like one."""
@@ -1488,6 +1498,15 @@ def render_summary(document: Dict[str, Any]) -> str:
     # Every report, not only one with findings. A clean or reference-only result
     # is the one people are most relaxed about posting publicly to say "I'm
     # fine" - and it carries the same usernames, profile names and paths.
+    w("")
+    be = document.get("blocklist_export") or {}
+    if be.get("written"):
+        w("")
+        w("  A {} blocklist of the {} matched network indicator{} was written.".format(
+            be.get("format", "hosts"), be["written"],
+            "" if be["written"] == 1 else "s"))
+        w("  Load it into a DNS filter (Pi-hole, AdGuard, NextDNS) so these")
+        w("  addresses are blocked in future.")
     w("")
     for line in _wrap(_PRIVACY_NOTE, 68):
         w("  " + line)
